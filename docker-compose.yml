@@ -1,0 +1,355 @@
+version: "3.9"
+
+services:
+
+  traefik:
+    hostname: traefik
+    image: traefik:${TRAEFIK_VERSION:?err}
+    container_name: traefik
+    ports:
+      - "80:80"
+      - "443:443"
+      - "5432"
+    networks:
+      frontend_net:
+        ipv4_address: 172.16.238.2
+      backend_net:
+        ipv4_address: 172.16.239.2
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 2G
+        reservations:
+          memory: 1G
+    restart: unless-stopped
+    volumes:
+      - "/etc/localtime:/etc/localtime:ro"
+      - "/var/run/docker.sock:/var/run/docker.sock:ro" 
+      - "./configs/certs:/etc/traefik/certs:ro"
+      - "./configs/traefik/configs/traefik.yaml:/etc/traefik/traefik.yaml"
+      - "./configs/traefik/configfiles:/etc/traefik/configfiles"
+    healthcheck:
+      test: 
+        - CMD
+        - traefik
+        - healthcheck
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik-dashboard.entrypoints=https"
+      - "traefik.http.routers.traefik-dashboard.rule=Host(`${SERVICE_PAGE_DOMAIN_NAME:?err}`) && (PathPrefix(`/api`) || PathPrefix(`/traefik`))"
+      - "traefik.http.routers.traefik-dashboard.service=api@internal"
+      - "traefik.http.routers.traefik-dashboard.tls=true"
+      # traefik-compress
+      - "traefik.http.routers.traefik.middlewares=traefik-compress"
+      - "traefik.http.middlewares.traefik-compress.compress=true"
+      # traefik middlewares
+      - "traefik.http.routers.traefik-dashboard.middlewares=traefik_auth,traefik_strip"
+      - "traefik.http.middlewares.traefik_auth.basicauth.users=${TRAEFIK_AUTH_DATA:?err}"
+      - "traefik.http.middlewares.traefik_strip.stripprefix.prefixes=/traefik"
+      # default_middleware
+      - "traefik.http.middlewares.default_middlewares.chain.middlewares=trafik_ratelimit,trafik_retry,slash_step1,slash_step2,http_header"
+      - "traefik.http.middlewares.trafik_ratelimit.ratelimit.average=100"
+      - "traefik.http.middlewares.trafik_ratelimit.ratelimit.burst=10"
+      - "traefik.http.middlewares.trafik_retry.retry.attempts=5"
+      # slash_step1 + slash_step2 | Add missing trailing slash
+      - "traefik.http.middlewares.slash_step1.redirectregex.regex=^(https?://[^/]+/[a-z0-9_]+)$$"
+      - "traefik.http.middlewares.slash_step1.redirectregex.replacement=$${1}/"
+      - "traefik.http.middlewares.slash_step1.redirectregex.permanent=true"
+      - "traefik.http.middlewares.slash_step2.stripprefixregex.regex=/[a-z0-9_]+"
+      # header_all
+      - "traefik.http.middlewares.http_header.headers.browserXssFilter=true"
+      - "traefik.http.middlewares.http_header.headers.contentTypeNosniff=true"
+      - "traefik.http.middlewares.http_header.headers.forceSTSHeader=true"
+      - "traefik.http.middlewares.http_header.headers.framedeny=true"
+      - "traefik.http.middlewares.http_header.headers.sslredirect=true"
+      - "traefik.http.middlewares.http_header.headers.stsIncludeSubdomains=true"
+      - "traefik.http.middlewares.http_header.headers.stsPreload=true"
+      - "traefik.http.middlewares.http_header.headers.stsSeconds=31536000"
+      - "traefik.http.middlewares.http_header.headers.featurePolicy=accelerometer 'none'; ambient-light-sensor 'none'; camera 'none'; geolocation 'none'; gyroscope 'none'; magnetometer 'none'; microphone 'none'; usb 'none'; midi 'none'; sync-xhr 'none'; vr 'none'"
+      - "traefik.http.middlewares.http_header.headers.contentSecurityPolicy=default-src https:"
+      - "traefik.http.middlewares.http_header.headers.referrerPolicy=strict-origin-when-cross-origin"
+
+  postgresql-server:
+    image: postgres:${POSTGRES_VERSION:?err}
+    container_name: postgresql-server
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?err}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?err}
+    networks:
+      backend_net:
+        ipv4_address: 172.16.239.13
+        aliases:
+          - db
+    deploy:
+      resources:
+        limits:
+          cpus: '8'
+          memory: 16G
+        reservations:
+          memory: 8G
+    volumes:
+      - "/etc/localtime:/etc/localtime:ro"
+      - "postgresql_data:/var/lib/postgresql/data:rw"
+    restart: unless-stopped
+    depends_on:
+      traefik: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:?err}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    labels: 
+      - "traefik.enable=true"
+      - "traefik.tcp.routers.postgresql-server.entrypoints=db"
+      - "traefik.tcp.routers.postgresql-server.rule=HostSNI(`*`)"
+      - "traefik.tcp.routers.postgresql-server.service=postgresql-server"
+      - "traefik.tcp.services.postgresql-server.loadbalancer.server.port=5432"
+
+  onlyoffice:
+    image: onlyoffice/documentserver:${ONLYOFFICE_VERSION:?err}
+    container_name: onlyoffice
+    networks:
+      frontend_net:
+        ipv4_address: 172.16.238.24
+      backend_net:
+        ipv4_address: 172.16.239.24
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 3G
+        reservations:
+          memory: 1G
+    extra_hosts:
+      - "${ONLYOFFICE_DOMAIN_NAME:?err}:172.16.238.24"
+    restart: unless-stopped
+    depends_on:
+      traefik: { condition: service_healthy }
+    volumes:
+      - "/etc/localtime:/etc/localtime:ro"
+      - "./configs/certs:/etc/onlyoffice/certs:ro"
+      - "./configs/onlyoffice/ds-ssl.conf.tmpl:/etc/onlyoffice/documentserver/nginx/ds-ssl.conf.tmpl"
+      - "./configs/onlyoffice/default.json:/etc/onlyoffice/documentserver/default.json"
+      - "onlyoffice_log:/var/log/onlyoffice"
+      - "onlyoffice_data:/var/www/onlyoffice/Data"
+      - "onlyoffice_cache:/var/lib/onlyoffice"
+      - "onlyoffice_database:/var/lib/postgresql"
+    labels:
+      - "traefik.enable=true"
+      # routers
+      - "traefik.http.routers.onlyoffice-secure.entrypoints=https"
+      - "traefik.http.routers.onlyoffice-secure.rule=Host(`${ONLYOFFICE_DOMAIN_NAME:?err}`)"
+      - "traefik.http.routers.onlyoffice-secure.tls=true"
+      - "traefik.http.routers.onlyoffice-secure.middlewares=onlyoffice-compress"
+      # middlewares
+      - "traefik.http.middlewares.onlyoffice-compress.compress=true"
+      # headers
+      - traefik.http.routers.onlyoffice-secure.middlewares=secure-headers
+      - traefik.http.middlewares.secure-headers.headers.customrequestheaders.X-Forwarded-Proto=https
+      - traefik.http.middlewares.cors-headers.headers.accesscontrolalloworiginlist=*
+      - traefik.http.routers.office.middlewares=secure-headers,cors-headers
+      # services
+      - "traefik.http.services.onlyoffice.loadbalancer.server.port=80"
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELK_VERSION:?err}
+    container_name: elasticsearch
+    environment:
+      - "ES_JAVA_OPTS=-Xms2g -Xmx2g"
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD:?err}
+      - bootstrap.memory_lock=true
+      - discovery.type=single-node
+      - cluster.name=docker-cluste
+      - cluster.routing.allocation.disk.threshold_enabled=true
+      - xpack.security.enabled=true
+    networks:
+      backend_net:
+        ipv4_address: 172.16.239.35
+    deploy:
+      resources:
+        limits:
+          cpus: '8'
+          memory: 3G
+        reservations:
+          memory: 1G
+    volumes:
+      - "/etc/localtime:/etc/localtime:ro"
+      - "./configs/elk/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml:ro"
+      - "elasticsearch_data:/usr/share/elasticsearch/data:rw"
+    healthcheck:
+      test: ["CMD", "curl","-s" ,"-f", "-u", "elastic:${ELASTIC_PASSWORD:?err}", "http://localhost:9200/_cat/health"]
+    restart: unless-stopped
+    depends_on:
+      traefik: { condition: service_healthy }
+    labels: 
+      - "traefik.enable=true"
+      - "traefik.tcp.routers.elasticsearch.entrypoints=elasticsearch"
+      - "traefik.tcp.routers.elasticsearch.rule=HostSNI(`*`)"
+      - "traefik.tcp.routers.elasticsearch.service=elasticsearch"
+      - "traefik.tcp.services.elasticsearch.loadbalancer.server.port=9200"
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:${ELK_VERSION:?err}
+    container_name: kibana
+    environment:
+      - ELASTICSEARCH_USERNAME=elastic
+      - ELASTICSEARCH_PASSWORD=${ELASTIC_PASSWORD:?err}
+      - ELASTICSEARCH_HOSTS=["http://elasticsearch:9200"]
+      - "SERVER_BASEPATH=/kibana"
+    networks:
+      backend_net:
+        ipv4_address: 172.16.239.46
+      frontend_net:
+        ipv4_address: 172.16.238.46
+    deploy:
+      resources:
+        limits:
+          cpus: '8'
+          memory: 1G
+        reservations:
+          memory: 768M
+    volumes:
+      - "/etc/localtime:/etc/localtime:ro"
+      - "./configs/elk/kibana.yml:/usr/share/kibana/config/kibana.yml:ro"
+    restart: unless-stopped
+    depends_on:
+      traefik: { condition: service_healthy }
+      elasticsearch: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-s", "-f", "http://localhost:5601/login"]
+      retries: 6
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.kibana.entrypoints=https"
+      - "traefik.http.routers.kibana.rule=Host(`${SERVICE_PAGE_DOMAIN_NAME:?err}`) && PathPrefix(`/kibana`)"
+      - "traefik.http.routers.kibana.tls=true"
+      - "traefik.http.services.kibana.loadbalancer.server.port=5601"
+      - "traefik.http.middlewares.kibana_stripprefix.stripprefix.prefixes=/kibana/"
+      - "traefik.http.middlewares.kibana-compress.compress=true"
+      - "traefik.http.middlewares.kibana_slash_step1.redirectregex.regex=^(https?://[^/]+/[a-z0-9_]+)$$"
+      - "traefik.http.middlewares.kibana_slash_step1.redirectregex.replacement=$${1}/"
+      - "traefik.http.middlewares.kibana_slash_step1.redirectregex.permanent=true"
+      - "traefik.http.routers.kibana.middlewares=kibana_stripprefix,kibana_slash_step1,kibana-compress"
+
+  portainer:
+    image: portainer/portainer-ce:${PORTAINER_VERSION:?err}
+    container_name: portainer
+    command: "-H unix:///var/run/docker.sock --admin-password ${PORTAINER_ADMIN_ENCRYPT_PASSWORD:?err}"
+    networks:
+      frontend_net:
+        ipv4_address: 172.16.238.57
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 256M
+        reservations:
+          memory: 128M
+    volumes:
+      - "/etc/localtime:/etc/localtime:ro"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "portainer_data:/data"
+    restart: unless-stopped
+    depends_on:
+      traefik: { condition: service_healthy }
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.portainer.entrypoints=https"
+      - "traefik.http.routers.portainer.rule=Host(`${SERVICE_PAGE_DOMAIN_NAME:?err}`) && PathPrefix(`/portainer/`)"
+      - "traefik.http.routers.portainer.tls=true"
+      - "traefik.http.services.portainer.loadbalancer.server.port=9000"
+      - "traefik.http.middlewares.portainer_stripprefix.stripprefix.prefixes=/portainer/"
+      - "traefik.http.middlewares.portainer-compress.compress=true"
+      - "traefik.http.middlewares.portainer_slash_step1.redirectregex.regex=^(https?://[^/]+/[a-z0-9_]+)$$"
+      - "traefik.http.middlewares.portainer_slash_step1.redirectregex.replacement=$${1}/"
+      - "traefik.http.middlewares.portainer_slash_step1.redirectregex.permanent=true"
+      - "traefik.http.routers.portainer.middlewares=portainer_stripprefix,portainer_slash_step1,portainer-compress"
+
+  pgadmin:
+    image: dpage/pgadmin4:${PGADMIN_VERSION:?err}
+    container_name: pgadmin
+    networks:
+      frontend_net:
+        ipv4_address: 172.16.238.68
+      backend_net:
+        ipv4_address: 172.16.239.68
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          memory: 256M
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:?err}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:?err}
+      SCRIPT_NAME: '/pgadmin'
+    volumes:
+      - "/etc/localtime:/etc/localtime:ro"
+      - "pgadmin_data:/var/lib/pgadmin"
+      - "./configs/pgadmin/servers.json:/pgadmin4/servers.json"
+    restart: unless-stopped
+    depends_on:
+      traefik: { condition: service_healthy }
+      postgresql-server: { condition: service_healthy }
+    labels: 
+      - "traefik.enable=true"
+      - "traefik.http.routers.pgadmin.entrypoints=https"
+      - "traefik.http.routers.pgadmin.tls=true"
+      - "traefik.http.routers.pgadmin.rule=Host(`${SERVICE_PAGE_DOMAIN_NAME:?err}`) && PathPrefix(`/pgadmin`)"
+      - "traefik.http.middlewares.pgadmin-compress.compress=true"
+      - "traefik.http.middlewares.pgadmin_slash_step1.redirectregex.regex=^(https?://[^/]+/[a-z0-9_]+)$$"
+      - "traefik.http.middlewares.pgadmin_slash_step1.redirectregex.replacement=$${1}/"
+      - "traefik.http.middlewares.pgadmin_slash_step1.redirectregex.permanent=true"
+      - "traefik.http.routers.pgadmin.middlewares=pgadmin_slash_step1,pgadmin-compress"
+      - "traefik.http.services.pgadmin.loadbalancer.server.port=80"
+
+  title-page:
+    image: nginx:${SERVICE_PAGE_NGINX_VERSION:?err}
+    container_name: title-page
+    networks:
+      frontend_net:
+        ipv4_address: 172.16.238.79
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
+        reservations:
+          memory: 64M
+    restart: unless-stopped
+    depends_on:
+      traefik: { condition: service_healthy }
+    volumes:
+      - "/etc/localtime:/etc/localtime:ro"
+      - "./configs/title-page/src:/usr/share/nginx/html"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.title-page.entrypoints=https"
+      - "traefik.http.routers.title-page.rule=Host(`${SERVICE_PAGE_DOMAIN_NAME:?err}`)"
+      - "traefik.http.routers.title-page.tls=true"
+      - "traefik.http.middlewares.title-page-compress.compress=true"
+      - "traefik.http.routers.title-page.middlewares=title-page-compress"
+      - "traefik.http.services.title-page.loadbalancer.server.port=80"
+
+volumes:
+  postgresql_data:
+  pgadmin_data:
+  portainer_data:
+  elasticsearch_data:
+  onlyoffice_log:
+  onlyoffice_data:
+  onlyoffice_cache:
+  onlyoffice_database:
+
+networks:
+  frontend_net:
+    external:
+      name: frontend_net
+  backend_net:
+    external:
+      name: backend_net
